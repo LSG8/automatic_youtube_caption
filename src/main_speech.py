@@ -1,10 +1,11 @@
 
 import sys
+import numpy as np
 import speech_recognition as sr
 from os import path
 from googletrans import Translator
 from pydub import AudioSegment
-from pydub.silence import split_on_silence
+from pydub.silence import split_on_silence, detect_leading_silence, detect_nonsilent, detect_silence
 
 sys.path.append('../')
 sys.path.append('../audio_examples')
@@ -19,14 +20,38 @@ settings = config['SETTINGS']
 def read_audio(file):
     audio_file = sr.AudioFile(file)
     with audio_file as source:
-        r.adjust_for_ambient_noise(source, duration= float(settings['offset_time']))
         audio = r.record(source)
         return audio
 
-def split_audio_with_silence(file):
-    audio = AudioSegment.from_file(file, settings['in_format'])
-    audio_chunks = split_on_silence(audio, min_silence_len=int(settings['stop_time']), silence_thresh= int(settings['silence_thresh']) )
-    return list(filter(lambda x : len(x) > 1000, audio_chunks))
+def split_audio_with_silence(audio):
+    speeches = detect_nonsilent(audio, min_silence_len=int(settings['stop_time']), silence_thresh= int(settings['silence_thresh']), seek_step=1)
+    return speeches
+
+def get_long_transcript(time_range, audio):#example time_range: [30075,34567]
+    speeches = break_into_small_parts(time_range, audio)#example speeches: [[30075,31567],[31567,34567]]
+    long_text = ""
+    for speech in speeches:##example speech: [30075,31567]
+        new_range = list(map(lambda x:x+time_range[0], speech))
+        split_audio_with_time(new_range, audio)
+        small_audio = read_audio(settings['output_split'])
+        long_text = long_text + " " + get_transcript(small_audio)
+    return long_text
+
+def break_into_small_parts(speeches, audio):#example speeches: [30075,34567]
+    """ duration = speeches[1] - speeches[0]
+    if duration >= 60000:
+        #break into parts
+        #np.linspace(speeches[0], speeches[1], num=-(duration/-60000), endpoint=True)
+
+        return single_minute_speeches #example speeches: [[30075,31567],[31567,34567]]
+    else:
+        return list(speeches) """
+    return detect_nonsilent(audio[speeches[0]:speeches[1]], min_silence_len=150, silence_thresh= -25, seek_step=1)
+
+def split_audio_with_time(time_range, audio):
+    newAudio = audio[time_range[0]:time_range[1]]
+    newAudio.export(settings['output_split'], format=settings['proc_format'])
+    return 0
 
 def get_transcript(audio):
     try:
@@ -39,11 +64,11 @@ def get_transcript(audio):
         print("Could not request results from Google Speech Recognition service; {0}".format(e))
         return ""
 
-def translate_text_write(text, time_start, time_end):
+def translate_text_write(text, time_range):
     translator = Translator()
     try:
         out = translator.translate(text, dest=settings['dest_language'])
-        caption = write_text(out.text, time_start, time_end)
+        caption = write_text(out.text, time_range)
         write_to_file(settings['output_transcript'],caption, "a+")
         return 0
     except TypeError:
@@ -53,11 +78,12 @@ def translate_text_write(text, time_start, time_end):
         print("Could not translate this time")
         return 0
 
-def write_text(text, time_start, time_end):
-    caption = "{},{}\n{}\n\n".format(convert(time_start),convert(time_end),text)
+def write_text(text, time_range):
+    caption = "{},{}\n{}\n\n".format(convert(time_range[0]),convert(time_range[1]),text)
     return caption
 
-def convert(seconds):
+def convert(ms):
+    seconds = ms/1000
     min, sec = divmod(seconds, 60)
     hour, min = divmod(min, 60)
     return '%d:%02d:%0.3f' % (hour, min, sec)
@@ -68,15 +94,8 @@ def write_to_file(file, text, mode):
     f.close()
 
 if __name__ == '__main__':
-    #print("start working")
-    chunks = split_audio_with_silence(settings['input_audio'])
-    time_start = 0
-    for audio_split in chunks:
-        duration = len(audio_split)/1000
-        output_file = settings['output_split']
-        audio_split.export(output_file, format=settings['proc_format'])
-        audio = read_audio(output_file)
-        transcript = get_transcript(audio)
-        translate_text_write(transcript, time_start, time_start+duration)
-        time_start = time_start + duration
-        #print("-" * 80)
+    audio = AudioSegment.from_file(settings['input_audio'], settings['in_format'])
+    chunks = split_audio_with_silence(audio) #example chunks: [[30075,34567],[34678,56789],[64389,78906]]
+    for audio_time_range in chunks:
+        long_transcript = get_long_transcript(audio_time_range, audio) #example audio_time_range: [30075,34567]
+        translated_long_text = translate_text_write(long_transcript, audio_time_range)
